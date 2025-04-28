@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QLabel, QLineEdit, QTreeWidget, QTreeWidgetItem,
                             QFileDialog, QSpinBox, QGroupBox, QMessageBox, QFrame, QCheckBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor
 import os
 from typing import Dict, List, Optional
@@ -19,6 +19,14 @@ class M3UDownloaderGUI(QMainWindow):
         # Initialize managers
         self.download_manager = DownloadManager(max_concurrent=3)
         self.entries: List[M3UEntry] = []
+
+        # Track active downloads
+        self.active_downloads = {}
+
+        # Create a timer to update download status
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_download_status)
+        self.status_timer.start(500)  # Update every 500ms
 
         # Setup UI
         self.setup_gui()
@@ -391,6 +399,33 @@ class M3UDownloaderGUI(QMainWindow):
             # If chunked downloading is disabled, set chunks to 1
             self.chunks_spin.setValue(1)
 
+    def update_download_status(self):
+        """Update the status and speed of active downloads in the UI."""
+        # Get active downloads from the download manager
+        active_downloads = self.download_manager.get_active_downloads()
+
+        if not active_downloads:
+            return
+
+        # Update the UI for each active download
+        for filepath, download_info in active_downloads.items():
+            filename = os.path.basename(filepath)
+
+            # Find the item in the tree
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                if item.text(0) == filename or filename.startswith(item.text(0)):
+                    # Update status if it's still "Queued"
+                    if item.text(2) == "Queued":
+                        item.setText(2, "Downloading...")
+
+                    # Update speed if available
+                    if 'speed' in download_info and download_info['speed'] > 0:
+                        speed_str = format_speed(download_info['speed'])
+                        item.setText(3, speed_str)
+                    break
+
     def closeEvent(self, event):
+        self.status_timer.stop()
         self.download_manager.shutdown()
         event.accept()

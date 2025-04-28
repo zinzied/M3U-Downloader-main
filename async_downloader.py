@@ -475,6 +475,7 @@ class DownloadManager:
         self.enable_chunked = enable_chunked
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent)
         self.download_state = DownloadState() if enable_resume else None
+        self.active_downloader = None
 
     def set_speed_limit(self, limit_bytes_per_sec: Optional[int]) -> None:
         """Set a global speed limit for all downloads in bytes per second."""
@@ -510,13 +511,19 @@ class DownloadManager:
             progress_callback: Callback function for progress updates
         """
         async def run_downloads():
-            async with AsyncDownloader(
+            # Create a new downloader instance
+            downloader = AsyncDownloader(
                 self.max_concurrent,
                 self.max_chunks,
                 self.max_speed_limit,
                 self.enable_resume,
                 self.enable_chunked
-            ) as downloader:
+            )
+
+            # Store reference to active downloader for status updates
+            self.active_downloader = downloader
+
+            async with downloader:
                 tasks = []
                 for url, filepath in downloads:
                     task = asyncio.create_task(
@@ -525,10 +532,51 @@ class DownloadManager:
                     tasks.append(task)
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+            # Clear reference when done
+            self.active_downloader = None
+
         def run_async_downloads():
             asyncio.run(run_downloads())
 
         self.executor.submit(run_async_downloads)
+
+    def get_active_downloads(self) -> Dict[str, Dict]:
+        """
+        Get information about active downloads including speed.
+
+        Returns:
+            Dictionary mapping filepath to download info including speed
+        """
+        result = {}
+
+        # If we have an active downloader, get its active downloads
+        if hasattr(self, 'active_downloader') and self.active_downloader:
+            # Process active downloads to extract speed information
+            for key, info in self.active_downloader.active_downloads.items():
+                filepath = info['filepath']
+
+                # Get speed from optimizer if available
+                speed = 0
+                if hasattr(self.active_downloader, 'optimizer'):
+                    speed = self.active_downloader.optimizer.get_download_speed(info['url']) or 0
+
+                # Combine information from multiple chunks for the same file
+                if filepath in result:
+                    # Update existing entry
+                    result[filepath]['bytes_downloaded'] += info['bytes_downloaded']
+                    # Use max speed from chunks
+                    if speed > result[filepath].get('speed', 0):
+                        result[filepath]['speed'] = speed
+                else:
+                    # Create new entry
+                    result[filepath] = {
+                        'url': info['url'],
+                        'bytes_downloaded': info['bytes_downloaded'],
+                        'total_size': info.get('total_size', 0),
+                        'speed': speed
+                    }
+
+        return result
 
     def shutdown(self):
         """Shutdown the download manager and cancel any pending downloads."""
