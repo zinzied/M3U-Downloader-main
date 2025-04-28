@@ -320,11 +320,18 @@ class M3UDownloaderGUI(QMainWindow):
             for i in range(self.tree.topLevelItemCount()):
                 item = self.tree.topLevelItem(i)
                 if item.text(0) == filename:
-                    item.setText(2, format_status(progress))
-                    if speed and progress < 100:
-                        item.setText(3, speed)
-                    elif progress >= 100:
+                    status_text = format_status(progress)
+                    item.setText(2, status_text)
+
+                    # Set green color for finished downloads
+                    if progress >= 100:
+                        item.setForeground(2, QColor("green"))
                         item.setText(3, "")
+                    else:
+                        # Reset color for in-progress downloads
+                        item.setForeground(2, QColor("black"))
+                        if speed:
+                            item.setText(3, speed)
                     found = True
                     break
 
@@ -332,6 +339,9 @@ class M3UDownloaderGUI(QMainWindow):
             if not found:
                 item = QTreeWidgetItem([filename, "Resuming...", format_status(progress), speed or ""])
                 self.tree.addTopLevelItem(item)
+                # Set color if needed
+                if progress >= 100:
+                    item.setForeground(2, QColor("green"))
 
         # Get incomplete downloads
         incomplete = self.download_manager.get_incomplete_downloads()
@@ -379,11 +389,18 @@ class M3UDownloaderGUI(QMainWindow):
             for i in range(self.tree.topLevelItemCount()):
                 item = self.tree.topLevelItem(i)
                 if item.text(0) == filename:
-                    item.setText(2, format_status(progress))
-                    if speed and progress < 100:
-                        item.setText(3, speed)
-                    elif progress >= 100:
+                    status_text = format_status(progress)
+                    item.setText(2, status_text)
+
+                    # Set green color for finished downloads
+                    if progress >= 100:
+                        item.setForeground(2, QColor("green"))
                         item.setText(3, "")
+                    else:
+                        # Reset color for in-progress downloads
+                        item.setForeground(2, QColor("black"))
+                        if speed:
+                            item.setText(3, speed)
                     break
 
         try:
@@ -418,6 +435,11 @@ class M3UDownloaderGUI(QMainWindow):
                     # Update status if it's still "Queued"
                     if item.text(2) == "Queued":
                         item.setText(2, "Downloading...")
+                        item.setForeground(2, QColor("black"))
+
+                    # Check if download is finished
+                    if item.text(2) == "Finished":
+                        item.setForeground(2, QColor("green"))
 
                     # Update speed if available
                     if 'speed' in download_info and download_info['speed'] > 0:
