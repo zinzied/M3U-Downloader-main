@@ -1,9 +1,11 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QLabel, QLineEdit, QTreeWidget, QTreeWidgetItem,
-                            QFileDialog, QSpinBox, QGroupBox, QMessageBox, QFrame, QCheckBox)
+                            QFileDialog, QSpinBox, QGroupBox, QMessageBox, QFrame, QCheckBox,
+                            QSystemTrayIcon, QMenu, QApplication)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QPalette, QColor
+from PyQt6.QtGui import QFont, QPalette, QColor, QIcon, QAction
 import os
+import sys
 from typing import Dict, List, Optional
 from m3u_parser import M3UParser, M3UEntry
 from async_downloader import DownloadManager
@@ -27,6 +29,9 @@ class M3UDownloaderGUI(QMainWindow):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_download_status)
         self.status_timer.start(500)  # Update every 500ms
+
+        # Setup system tray
+        self.setup_tray()
 
         # Setup UI
         self.setup_gui()
@@ -148,21 +153,51 @@ class M3UDownloaderGUI(QMainWindow):
         button_layout = QHBoxLayout(button_frame)
         button_layout.setContentsMargins(0, 0, 0, 0)
 
+        # File management buttons
         load_btn = QPushButton("Load M3U")
         download_selected_btn = QPushButton("Download Selected")
         download_all_btn = QPushButton("Download All")
         resume_btn = QPushButton("Resume Downloads")
 
+        # Download control buttons
+        self.pause_btn = QPushButton("Pause")
+        self.continue_btn = QPushButton("Continue")
+        self.stop_btn = QPushButton("Stop")
+        self.minimize_btn = QPushButton("Minimize to Tray")
+
+        # Connect button signals
         load_btn.clicked.connect(self.load_m3u)
         download_selected_btn.clicked.connect(self.download_selected)
         download_all_btn.clicked.connect(self.download_all)
         resume_btn.clicked.connect(self.resume_downloads)
-        resume_btn.setToolTip("Resume any previously interrupted downloads")
+        self.pause_btn.clicked.connect(self.pause_downloads)
+        self.continue_btn.clicked.connect(self.continue_downloads)
+        self.stop_btn.clicked.connect(self.stop_downloads)
+        self.minimize_btn.clicked.connect(self.minimize_to_tray)
 
+        # Set tooltips
+        resume_btn.setToolTip("Resume any previously interrupted downloads")
+        self.pause_btn.setToolTip("Pause current downloads")
+        self.continue_btn.setToolTip("Continue paused downloads")
+        self.stop_btn.setToolTip("Stop all downloads")
+        self.minimize_btn.setToolTip("Minimize application to system tray")
+
+        # Initially disable control buttons
+        self.pause_btn.setEnabled(False)
+        self.continue_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+
+        # Add buttons to layout
         button_layout.addWidget(load_btn)
         button_layout.addWidget(download_selected_btn)
         button_layout.addWidget(download_all_btn)
         button_layout.addWidget(resume_btn)
+        button_layout.addSpacing(20)
+        button_layout.addWidget(self.pause_btn)
+        button_layout.addWidget(self.continue_btn)
+        button_layout.addWidget(self.stop_btn)
+        button_layout.addSpacing(20)
+        button_layout.addWidget(self.minimize_btn)
         button_layout.addStretch()
 
         # Status Bar
@@ -361,6 +396,11 @@ class M3UDownloaderGUI(QMainWindow):
             try:
                 self.download_manager.resume_all_downloads(progress_callback=update_progress)
                 self.statusBar().showMessage(f"Resuming {len(incomplete)} downloads...")
+
+                # Enable control buttons
+                self.pause_btn.setEnabled(True)
+                self.stop_btn.setEnabled(True)
+                self.continue_btn.setEnabled(False)
             except Exception as e:
                 QMessageBox.critical(self, "Resume Error", f"Failed to resume downloads: {str(e)}")
 
@@ -406,6 +446,11 @@ class M3UDownloaderGUI(QMainWindow):
         try:
             self.download_manager.start_downloads(downloads, progress_callback=update_progress)
             self.statusBar().showMessage(f"Downloading {len(downloads)} files...")
+
+            # Enable control buttons
+            self.pause_btn.setEnabled(True)
+            self.stop_btn.setEnabled(True)
+            self.continue_btn.setEnabled(False)
         except Exception as e:
             QMessageBox.critical(self, "Download Error", f"Failed to start downloads: {str(e)}")
 
@@ -420,6 +465,9 @@ class M3UDownloaderGUI(QMainWindow):
         """Update the status and speed of active downloads in the UI."""
         # Get active downloads from the download manager
         active_downloads = self.download_manager.get_active_downloads()
+
+        # Update control buttons based on download status
+        self.update_control_buttons()
 
         if not active_downloads:
             return
@@ -437,17 +485,104 @@ class M3UDownloaderGUI(QMainWindow):
                         item.setText(2, "Downloading...")
                         item.setForeground(2, QColor("black"))
 
+                    # Update status if download is paused
+                    if 'paused' in download_info and download_info['paused'] and item.text(2) != "Paused":
+                        item.setText(2, "Paused")
+                        item.setForeground(2, QColor("orange"))
+
                     # Check if download is finished
                     if item.text(2) == "Finished":
                         item.setForeground(2, QColor("green"))
 
                     # Update speed if available
-                    if 'speed' in download_info and download_info['speed'] > 0:
+                    if 'speed' in download_info and download_info['speed'] > 0 and not download_info.get('paused', False):
                         speed_str = format_speed(download_info['speed'])
                         item.setText(3, speed_str)
+                    elif download_info.get('paused', False):
+                        item.setText(3, "")
                     break
 
+    def setup_tray(self):
+        """Setup system tray icon and menu."""
+        # Create system tray icon
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon.fromTheme("download", QIcon.fromTheme("go-down")))
+
+        # Create tray menu
+        tray_menu = QMenu()
+
+        # Add actions to the menu
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self.show)
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self.close)
+
+        tray_menu.addAction(show_action)
+        tray_menu.addAction(quit_action)
+
+        # Set the menu for the tray icon
+        self.tray_icon.setContextMenu(tray_menu)
+
+        # Connect activated signal
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+
+        # Show the tray icon
+        self.tray_icon.show()
+
+    def tray_icon_activated(self, reason):
+        """Handle tray icon activation."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show()
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+            self.activateWindow()
+
+    def minimize_to_tray(self):
+        """Minimize the application to system tray."""
+        self.hide()
+        self.tray_icon.showMessage(
+            "M3U Downloader",
+            "Application minimized to tray. Double-click to restore.",
+            QSystemTrayIcon.MessageIcon.Information,
+            2000
+        )
+
+    def pause_downloads(self):
+        """Pause all active downloads."""
+        if self.download_manager.pause_downloads():
+            self.statusBar().showMessage("Downloads paused")
+            self.pause_btn.setEnabled(False)
+            self.continue_btn.setEnabled(True)
+            self.stop_btn.setEnabled(True)
+
+    def continue_downloads(self):
+        """Continue paused downloads."""
+        if self.download_manager.continue_downloads():
+            self.statusBar().showMessage("Downloads continuing...")
+            self.pause_btn.setEnabled(True)
+            self.continue_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+
+    def stop_downloads(self):
+        """Stop all active downloads."""
+        if self.download_manager.stop_downloads():
+            self.statusBar().showMessage("Downloads stopped")
+            self.pause_btn.setEnabled(False)
+            self.continue_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+
+    def update_control_buttons(self):
+        """Update the state of control buttons based on download status."""
+        has_active = self.download_manager.has_active_downloads()
+        is_paused = self.download_manager.is_paused()
+
+        self.pause_btn.setEnabled(has_active and not is_paused)
+        self.continue_btn.setEnabled(has_active and is_paused)
+        self.stop_btn.setEnabled(has_active)
+
     def closeEvent(self, event):
+        """Handle window close event."""
         self.status_timer.stop()
         self.download_manager.shutdown()
+        self.tray_icon.hide()
         event.accept()

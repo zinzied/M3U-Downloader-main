@@ -476,6 +476,9 @@ class DownloadManager:
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent)
         self.download_state = DownloadState() if enable_resume else None
         self.active_downloader = None
+        self.paused = False
+        self.current_downloads = []  # Track current downloads for pause/resume
+        self.future = None  # Store the future for the current download task
 
     def set_speed_limit(self, limit_bytes_per_sec: Optional[int]) -> None:
         """Set a global speed limit for all downloads in bytes per second."""
@@ -510,6 +513,10 @@ class DownloadManager:
             downloads: List of (url, filepath) tuples
             progress_callback: Callback function for progress updates
         """
+        # Store current downloads for pause/resume functionality
+        self.current_downloads = downloads
+        self.paused = False
+
         async def run_downloads():
             # Create a new downloader instance
             downloader = AsyncDownloader(
@@ -530,15 +537,88 @@ class DownloadManager:
                         downloader.download_file(url, filepath, progress_callback)
                     )
                     tasks.append(task)
-                await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Wait for all tasks to complete or until paused/stopped
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    # Handle cancellation (pause or stop)
+                    logger.info("Downloads were cancelled")
+                    # Save state for all active downloads if paused
+                    if self.paused and self.enable_resume and self.download_state:
+                        for key, info in downloader.active_downloads.items():
+                            filepath = info['filepath']
+                            url = info['url']
+                            # Save download state for resuming later
+                            if filepath and url:
+                                # Collect chunk progress
+                                downloaded_chunks = {}
+                                for k, data in downloader.active_downloads.items():
+                                    if k.startswith(f"{filepath}_"):
+                                        chunk_id = data['chunk_id']
+                                        downloaded_chunks[chunk_id] = data['bytes_downloaded']
+
+                                # Only save if we have progress
+                                if downloaded_chunks:
+                                    self.download_state.save_state(
+                                        filepath=filepath,
+                                        url=url,
+                                        downloaded_chunks=downloaded_chunks,
+                                        total_size=info.get('total_size', 0),
+                                        chunk_ranges=[]  # Will be recalculated on resume
+                                    )
+
+                    # Cancel all tasks
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+
+                    # Wait for tasks to be cancelled
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
             # Clear reference when done
             self.active_downloader = None
 
         def run_async_downloads():
-            asyncio.run(run_downloads())
+            try:
+                asyncio.run(run_downloads())
+            except Exception as e:
+                logger.error(f"Error in download thread: {str(e)}")
 
-        self.executor.submit(run_async_downloads)
+        # Store the future for cancellation
+        self.future = self.executor.submit(run_async_downloads)
+
+    def pause_downloads(self):
+        """Pause all active downloads."""
+        if self.active_downloader and not self.paused:
+            logger.info("Pausing downloads...")
+            self.paused = True
+            if self.future:
+                self.future.cancel()
+            return True
+        return False
+
+    def continue_downloads(self):
+        """Continue paused downloads."""
+        if self.paused and self.current_downloads:
+            logger.info("Continuing downloads...")
+            self.paused = False
+            # Start the downloads again
+            self.start_downloads(self.current_downloads)
+            return True
+        return False
+
+    def stop_downloads(self):
+        """Stop all active downloads."""
+        if self.active_downloader:
+            logger.info("Stopping downloads...")
+            self.paused = False  # Not paused, fully stopped
+            if self.future:
+                self.future.cancel()
+            # Clear current downloads
+            self.current_downloads = []
+            return True
+        return False
 
     def get_active_downloads(self) -> Dict[str, Dict]:
         """
@@ -573,11 +653,22 @@ class DownloadManager:
                         'url': info['url'],
                         'bytes_downloaded': info['bytes_downloaded'],
                         'total_size': info.get('total_size', 0),
-                        'speed': speed
+                        'speed': speed,
+                        'paused': self.paused
                     }
 
         return result
 
+    def is_paused(self) -> bool:
+        """Check if downloads are currently paused."""
+        return self.paused
+
+    def has_active_downloads(self) -> bool:
+        """Check if there are any active downloads."""
+        return bool(self.active_downloader and self.active_downloader.active_downloads)
+
     def shutdown(self):
         """Shutdown the download manager and cancel any pending downloads."""
+        # Stop any active downloads
+        self.stop_downloads()
         self.executor.shutdown(wait=False)
